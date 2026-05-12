@@ -1,0 +1,56 @@
+# Template del PipelineRun — Tekton Triggers lo instancia por cada tag push.
+# Los parámetros con $(tt.params.*) los inyecta el TriggerTemplate del EventListener.
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: api02-deploy-
+  namespace: tekton-pipelines
+  labels:
+    app: webserver-api02
+spec:
+  pipelineRef:
+    name: app-deploy-pipeline
+  params:
+  - name: git-url
+    value: https://github.com/Valentino-33/webserver-api02
+  - name: git-revision
+    value: $(tt.params.git-revision)
+  - name: app-name
+    value: webserver-api02
+  - name: image-tag
+    value: $(tt.params.image-tag)
+  - name: strategy
+    value: $(tt.params.strategy)
+  - name: environment
+    value: $(tt.params.environment)
+  - name: dockerhub-user
+    value: valentinobruno
+  - name: gitops-repo-url
+    value: https://github.com/Valentino-33/gitops-files
+  serviceAccountName: tekton-build-sa
+  workspaces:
+  - name: workspace
+    volumeClaimTemplate:
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 1Gi
+        # En k3d usar storageClassName: local-path
+        storageClassName: gp3
+  - name: gitops-workspace
+    volumeClaimTemplate:
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 100Mi
+        storageClassName: gp3
+  podTemplate:
+    nodeSelector:
+      role: cicd
+    tolerations:
+    - key: workload
+      operator: Equal
+      value: cicd
+      effect: NoSchedule
