@@ -1,16 +1,16 @@
 # webserver-api02
 
-API Python (FastAPI) con estrategia de deployment **Canary** vía ArgoRollouts.
+API Python (FastAPI) con estrategia de deployment **Canary** vía Argo Rollouts.
 
 ## Endpoints
 
 | Método | Path | Descripción |
 |---|---|---|
 | GET | `/` | Info del servicio y versión |
-| GET | `/health` | Health check (liveness/readiness probe de K8s) |
+| GET | `/health` | Health check (liveness/readiness probe de k8s) |
 | GET | `/version` | Versión actual |
-| GET | `/api02/hello` | Endpoint de negocio |
-| GET | `/api02/metrics` | Métricas Prometheus |
+| GET | `/api02/hello` | Endpoint de negocio (lo que prueban los load tests) |
+| GET | `/api02/metrics` | Métricas Prometheus (scrapeadas vía ServiceMonitor) |
 
 ## Correr local
 
@@ -27,21 +27,71 @@ docker build -t local/api02:test .
 docker run --rm -p 8001:8000 -e APP_VERSION=0.1.0 local/api02:test
 ```
 
+## Logging
+
+Los logs salen a stdout en **JSON** vía `structlog` (config: `app/logging_config.py`).
+Cada línea es un evento parseable:
+
+```json
+{"event":"request","method":"GET","path":"/health","status":200,"level":"info","timestamp":"2026-05-12T12:34:56Z"}
+```
+
+Fluent-bit los ingesta a Elasticsearch y aparecen en Kibana bajo `kubernetes.namespace_name : "webserver-api02-dev"`.
+Ver guía completa en el repo de infra: `docs/logging-efk.md`.
+
 ## Estrategia de deploy — Canary
 
-Rollout gradual: 5% → 25% → 50% → 100%. En cada step corre `loadtest/load-canary.js`.
-Si algún check falla → rollback automático.
+El Rollout sube el peso del canary RS por steps (5% → pause → 25% → pause → 50% → pause).
+En cada `pause`, el pipeline corre `loadtest/load-canary.js` contra el svc stable — durante un
+canary activo, ese svc envía una fracción del tráfico al RS nuevo (canary) según el step. Si
+el load test pasa, el pipeline emite `kubectl patch status.promoteFull=true` y el canary salta
+directo al 100%.
+
+Detalle completo del pipeline en el repo de infra: `docs/pipeline-stages.md`.
 
 ## Disparar el pipeline
 
+El webhook responde a tags con el formato `refs/tags/release/<semver>/<env>`:
+
 ```bash
-git tag -a v1.0.0 -m "strategy:Canary"
-git push origin v1.0.0
+# Deploy a dev:
+git tag release/v1.2.0/dev
+git push origin release/v1.2.0/dev
+
+# Deploy a dev + staging en el mismo run:
+git tag release/v1.2.0/dev,staging
+git push origin release/v1.2.0/dev,staging
 ```
+
+El nombre del PipelineRun queda determinístico: `webserver-api02-pipelinerun-v1.2.0`.
 
 ## Load tests
 
+Tres scripts, cada uno con un propósito distinto:
+
+| Script | Cuándo se usa | Propósito | Métrica clave |
+|--------|---------------|-----------|---------------|
+| `loadtest/smoke.js` | Local / verificación rápida | Sanity check de endpoints | status 200 + p95<500ms |
+| `loadtest/load-canary.js` | **Pipeline Stage 5** | Validación funcional bajo carga real (1000 VUs, ramp + sustained) sobre el stable svc durante el canary | p95<2s, p99<3s, errors<5%, canary_hits>0 |
+| `loadtest/burn-to-scale.js` | **Pipeline Stage 7** | Saturar CPU del pod para validar que el HPA escala el Rollout | (no thresholds — el éxito lo decide kubectl polling de replicas en el Task) |
+
+Corrida local de cada uno:
+
 ```bash
+# Smoke
 k6 run loadtest/smoke.js -e BASE_URL=http://localhost:8001
-k6 run loadtest/load-canary.js -e BASE_URL=http://localhost:8001
+
+# Load test canary — necesita el cluster k3d arriba (api02.localhost mapeado al ingress)
+k6 run loadtest/load-canary.js -e BASE_URL=http://api02.localhost:8888
+
+# Burn-to-scale — observar HPA en paralelo:
+# kubectl get hpa webserver-api02-dev -n webserver-api02-dev -w
+k6 run loadtest/burn-to-scale.js -e TARGET_URL=http://api02.localhost:8888
+```
+
+Para invocar los mismos tests vía el Makefile del repo de infra (clona este repo a /tmp):
+
+```bash
+make load-test-smoke APP=webserver-api02
+make load-test-canary
 ```
