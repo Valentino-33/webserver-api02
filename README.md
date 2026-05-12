@@ -49,9 +49,11 @@ directo al 100%.
 
 Detalle completo del pipeline en el repo de infra: `docs/pipeline-stages.md`.
 
-## Disparar el pipeline
+## Disparar pipelines
 
-El webhook responde a tags con el formato `refs/tags/release/<semver>/<env>`:
+El webhook del EventListener responde a **dos formatos de tag**:
+
+### Release pipeline (`refs/tags/release/<semver>/<env>`)
 
 ```bash
 # Deploy a dev:
@@ -63,7 +65,24 @@ git tag release/v1.2.0/dev,staging
 git push origin release/v1.2.0/dev,staging
 ```
 
-El nombre del PipelineRun queda determinístico: `webserver-api02-pipelinerun-v1.2.0`.
+Nombre del PipelineRun determinístico: `webserver-api02-pipelinerun-v1.2.0`. Re-pushear el mismo tag falla (intencional — forzar nuevo semver).
+
+### Burn pipeline (`refs/tags/burn/<env>`) — HPA capacity test on-demand
+
+```bash
+# Validar que el HPA escala bajo carga en dev:
+git tag burn/dev
+git push origin burn/dev
+```
+
+Nombre con `generateName`: `webserver-api02-burn-dev-<random>`. Re-pushear el mismo tag requiere borrarlo primero:
+
+```bash
+git tag -d burn/dev && git push --delete origin burn/dev
+git tag burn/dev && git push origin burn/dev
+```
+
+> El burn pipeline es **independiente del release**. Disparalo cuando tunees el HPA, antes de un evento de alta carga, o como check periódico. NO corre en cada release porque mete ~3min de CPU saturada al ciclo y la config de HPA cambia raramente.
 
 ## Load tests
 
@@ -72,8 +91,8 @@ Tres scripts, cada uno con un propósito distinto:
 | Script | Cuándo se usa | Propósito | Métrica clave |
 |--------|---------------|-----------|---------------|
 | `loadtest/smoke.js` | Local / verificación rápida | Sanity check de endpoints | status 200 + p95<500ms |
-| `loadtest/load-canary.js` | **Pipeline Stage 5** | Validación funcional bajo carga real (1000 VUs, ramp + sustained) sobre el stable svc durante el canary | p95<2s, p99<3s, errors<5%, canary_hits>0 |
-| `loadtest/burn-to-scale.js` | **Pipeline Stage 7** | Saturar CPU del pod para validar que el HPA escala el Rollout | (no thresholds — el éxito lo decide kubectl polling de replicas en el Task) |
+| `loadtest/load-canary.js` | **Release pipeline, Stage 5** | Validación funcional bajo carga real (1000 VUs, ramp + sustained) sobre el stable svc durante el canary | p95<2s, p99<3s, errors<5%, canary_hits>0 |
+| `loadtest/burn-to-scale.js` | **Burn pipeline** (`burn/<env>` tag) | Saturar CPU del pod para validar que el HPA escala el Rollout. Corre on-demand, NO en cada release | (no thresholds — el éxito lo decide kubectl polling de replicas en el Task) |
 
 Corrida local de cada uno:
 
