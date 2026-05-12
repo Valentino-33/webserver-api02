@@ -20,7 +20,8 @@ export const options = {
   },
 };
 
-const BASE_URL = __ENV.BASE_URL || 'http://webserver-api02-stable.apps.svc.cluster.local:8000';
+// Fallback solo para corridas locales. El pipeline pasa BASE_URL via env var.
+const BASE_URL = __ENV.BASE_URL || 'http://webserver-api02-dev-stable.webserver-api02-dev.svc.cluster.local:8080';
 
 export default function () {
   const healthRes = http.get(`${BASE_URL}/health`);
