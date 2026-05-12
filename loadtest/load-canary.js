@@ -36,9 +36,10 @@ export const options = {
     http_req_duration: ['p(95)<3000', 'p(99)<5000'],
     http_req_failed:   ['rate<0.20'],
     errors:            ['rate<0.20'],
-    // Si el canary está activo esperamos ver hits a la versión nueva.
-    // (Si no hay traffic split, este threshold falla.)
-    canary_hits:       ['count>0'],
+    // canary_hits es informativo (no falla el pipeline). Requiere
+    // CANARY_VERSION env var que el pipeline no pasa hoy. Si lo querés
+    // como hard check, agregar `'count>0'` y modificar task-load-test.yaml
+    // para pasar -e CANARY_VERSION=$IMAGE_TAG.
   },
 };
 
