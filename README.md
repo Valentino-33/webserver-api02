@@ -1,23 +1,39 @@
 # webserver-api02
 
-API Python (FastAPI) con estrategia de deployment **Canary** vía Argo Rollouts.
+API Python (FastAPI) con estrategia de deployment **Canary** vía Argo Rollouts. A diferencia de api01 (hello-world simple), api02 expone un **catálogo de items en memoria** + endpoint de echo — sirve para demos donde queremos ver claramente cuál pod respondió cada request durante el split de tráfico del canary.
+
+**Todos los endpoints viven bajo `/api02/*`** — la raíz `/` NO responde nada. Los probes apuntan a `/api02/health`.
 
 ## Endpoints
 
 | Método | Path | Descripción |
 |---|---|---|
-| GET | `/` | Info del servicio y versión |
-| GET | `/health` | Health check (liveness/readiness probe de k8s) |
-| GET | `/version` | Versión actual |
-| GET | `/api02/hello` | Endpoint de negocio (lo que prueban los load tests) |
+| GET | `/api02/` | Landing — service info + lista de endpoints |
+| GET | `/api02/health` | Health check (liveness/readiness probe de k8s) |
+| GET | `/api02/version` | Versión actual + metadata del deployment |
+| GET | `/api02/hello` | Endpoint de negocio — saluda desde la versión actual |
+| GET | `/api02/items` | Lista el catálogo completo (5 items) — **exclusivo de api02** |
+| GET | `/api02/items/{id}` | Item del catálogo por ID (404 si no existe) — **exclusivo de api02** |
+| GET | `/api02/echo?msg=X` | Echo del mensaje + metadata — **exclusivo de api02** |
+| GET | `/api02/info` | Metadata extra: uptime, catalog size, log level |
 | GET | `/api02/metrics` | Métricas Prometheus (scrapeadas vía ServiceMonitor) |
+
+### Métricas custom
+
+| Métrica | Tipo | Notas |
+|---|---|---|
+| `api02_requests_total` | Counter | Total de requests por method/endpoint/status |
+| `api02_request_duration_seconds_*` | Histogram | Buckets de latencia |
+| `api02_catalog_items` | **Gauge** | Tamaño del catálogo. **api01 no tiene esta métrica** — diferenciación visual en Grafana. |
 
 ## Correr local
 
 ```bash
 pip install -e .
 uvicorn app.main:app --reload --port 8001
-curl localhost:8001/health
+curl localhost:8001/api02/health
+curl localhost:8001/api02/items
+curl localhost:8001/api02/echo?msg=test
 ```
 
 ## Docker
@@ -33,7 +49,7 @@ Los logs salen a stdout en **JSON** vía `structlog` (config: `app/logging_confi
 Cada línea es un evento parseable:
 
 ```json
-{"event":"request","method":"GET","path":"/health","status":200,"level":"info","timestamp":"2026-05-12T12:34:56Z"}
+{"event":"request","method":"GET","path":"/api02/health","status":200,"version":"v0.5.0","level":"info","timestamp":"2026-05-12T12:34:56Z"}
 ```
 
 Fluent-bit los ingesta a Elasticsearch y aparecen en Kibana bajo `kubernetes.namespace_name : "webserver-api02-dev"`.

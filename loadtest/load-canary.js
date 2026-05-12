@@ -1,16 +1,17 @@
-// load-canary.js — Stage 5 del pipeline para webserver-api02.
+// load-canary.js — Stage 5 del release pipeline para webserver-api02.
 //
 // Apunta al STABLE service: cuando un canary está activo, el stable svc
-// recibe el split de tráfico configurado por argo-rollouts (5/25/50% inicial
-// hacia canary, resto hacia la versión vieja). Pegarle al stable simula
-// tráfico real — algunos requests caerán en el canary, otros no.
+// recibe el split de tráfico configurado por argo-rollouts (5/25/50% al
+// canary RS, resto a la versión vieja). Pegarle al stable simula tráfico
+// real — algunos requests caerán en el canary, otros no.
 //
 // Por qué no preview:
-//   El svc preview enrutea 100% al canary RS. Eso es útil para smoke testing
-//   directo del canary, pero no representa la distribución real de tráfico.
-//   Para canary queremos ver cómo se comporta la app bajo el split realista.
+//   El svc preview enrutea 100% al canary RS. Útil para smoke testing
+//   directo, pero no representa distribución real. Para canary queremos
+//   ver cómo se comporta el sistema bajo el split.
 //
-// Ramp profile + thresholds: mismo criterio que load-bluegreen (1000 VUs).
+// Ramp y thresholds: mismo criterio que load-bluegreen (1000 VUs, 10%
+// errors permitidos durante ventana de scale-up del HPA).
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Rate, Trend, Counter } from 'k6/metrics';
@@ -26,9 +27,9 @@ export const options = {
       executor: 'ramping-vus',
       startVUs: 0,
       stages: [
-        { duration: '20s', target: 50 },
-        { duration: '30s', target: 200 },
-        { duration: '30s', target: 500 },
+        { duration: '30s', target: 100 },
+        { duration: '30s', target: 300 },
+        { duration: '30s', target: 600 },
         { duration: '60s', target: 1000 },
         { duration: '30s', target: 1000 },
         { duration: '20s', target: 0 },
@@ -38,24 +39,24 @@ export const options = {
   },
   thresholds: {
     http_req_duration: ['p(95)<2000', 'p(99)<3000'],
-    http_req_failed:   ['rate<0.05'],
-    errors:            ['rate<0.05'],
-    // Importante: durante un canary activo, esperamos VER algunos hits en
-    // la versión nueva. Si todos los responses traen versión vieja, algo
-    // anda mal con el traffic split del rollout.
+    http_req_failed:   ['rate<0.10'],
+    errors:            ['rate<0.10'],
+    // Durante un canary activo esperamos VER hits en la versión nueva.
+    // Si todos responses traen versión vieja, el traffic split del rollout
+    // no está enrutando al RS nuevo → fail hard.
     canary_hits:       ['count>0'],
   },
 };
 
 const BASE_URL = __ENV.BASE_URL || 'http://api02.localhost:8888';
-// CANARY_VERSION: tag del image que el canary está sirviendo. Si responses
-// vienen con ese version → suman canary_hits. Sin él, no podemos distinguir.
 const CANARY_VERSION = __ENV.CANARY_VERSION || '';
 
 export default function () {
-  const healthRes = http.get(`${BASE_URL}/health`, { tags: { endpoint: 'health' } });
+  // 1. /api02/health — schema más rico que api01 (incluye catalog_loaded)
+  const healthRes = http.get(`${BASE_URL}/api02/health`, { tags: { endpoint: 'health' } });
   check(healthRes, { 'health 200': (r) => r.status === 200 });
 
+  // 2. /api02/hello — endpoint de negocio
   const apiRes = http.get(`${BASE_URL}/api02/hello`, { tags: { endpoint: 'hello' } });
   const ok = check(apiRes, {
     'api 200': (r) => r.status === 200,
@@ -66,8 +67,13 @@ export default function () {
   errorRate.add(!ok);
   latencyTrend.add(apiRes.timings.duration);
 
-  // Contamos hits por versión — útil para verificar que el split de tráfico
-  // del canary efectivamente está enrutando una fracción al RS nuevo.
+  // 3. /api02/items — endpoint exclusivo de api02 (api01 no lo tiene),
+  //    valida que el catálogo está cargado en el RS nuevo.
+  const itemsRes = http.get(`${BASE_URL}/api02/items`, { tags: { endpoint: 'items' } });
+  check(itemsRes, { 'items 200': (r) => r.status === 200 });
+
+  // 4. Contar hits por versión — útil para verificar el split de tráfico
+  //    del canary durante el step paused.
   if (CANARY_VERSION) {
     try {
       const v = JSON.parse(apiRes.body).version;
